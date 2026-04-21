@@ -4,24 +4,27 @@ import time
 import json
 import requests
 from email.header import decode_header
+import os
 
 # ====================================================
-# SINGLE EMAIL TO WEBHOOK FORWARDER
+# YOUR GMAIL ACCOUNT SETTINGS
 # ====================================================
 
-# Your Gmail settings
-EMAIL_ADDRESS = "@gmail.com"
-EMAIL_PASSWORD =   # Your app password
+EMAIL_ADDRESS = "thecoolmsster@gmail.com"
+EMAIL_PASSWORD = "wupo asux mytq qdhu"  # Your App Password
 IMAP_SERVER = "imap.gmail.com"
-IMAP_PORT = 
+IMAP_PORT = 993
 
-# Webhook settings (YOUR ngrok URL)
+# Your ngrok webhook URL
 WEBHOOK_URL = "https://bleep-latitude-morbidly.ngrok-free.dev/webhook"
 
 # Check interval (seconds)
 CHECK_INTERVAL = 5
 
-# Track already processed emails
+# ====================================================
+# DO NOT MODIFY BELOW THIS LINE
+# ====================================================
+
 processed_ids = set()
 
 def get_email_body(msg):
