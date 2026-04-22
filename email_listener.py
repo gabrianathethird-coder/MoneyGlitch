@@ -10,8 +10,8 @@ import os
 # YOUR GMAIL ACCOUNT SETTINGS
 # ====================================================
 
-EMAIL_ADDRESS = "thecoolmsster@gmail.com"
-EMAIL_PASSWORD = "wupo asux mytq qdhu"  # Your App Password
+EMAIL_ADDRESS = "glitchm917@gmail.com"
+EMAIL_PASSWORD = "bqzf lzzu jgsm qxjz"  # Your App Password
 IMAP_SERVER = "imap.gmail.com"
 IMAP_PORT = 993
 
@@ -21,7 +21,7 @@ WEBHOOK_URL = "https://bleep-latitude-morbidly.ngrok-free.dev/webhook"
 # Check interval (seconds)
 CHECK_INTERVAL = 5
 
-# ====================================================
+# ====================================================a
 # DO NOT MODIFY BELOW THIS LINE
 # ====================================================
 
