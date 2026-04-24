@@ -272,21 +272,21 @@ def webhook():
     setup_quality = predict_setup_quality(features)
     recommendation = get_trade_recommendation(setup_quality, strength)
     
-    # Print detailed analysis
-    print(f"📊 ZONE ANALYSIS")
-    print(f"   ├─ Strength: {strength}%")
-    print(f"   ├─ Touches: {touches}")
-    print(f"   ├─ Timeframe: {timeframe}")
-    print(f"   ├─ Volume Score: {volume_score}")
-    print(f"   └─ Direction: {'BEARISH' if is_bearish else 'BULLISH'}")
-    
-    print(f"\n🎯 SETUP QUALITY SCORE: {setup_quality:.1f}%")
-    print(f"   ├─ Recommendation: {recommendation['action']}")
-    print(f"   ├─ Confidence: {recommendation['confidence']}")
-    print(f"   ├─ Risk Level: {recommendation['risk_level']}")
-    print(f"   └─ Suggestion: {recommendation['suggestion']}")
-    
-    print("\n" + "="*60)
+    # Print detailed analysis WITH PRICE
+    print(f"\n💰 ZONE ALERT! 💰")
+    print(f"{'='*50}")
+    print(f"📍 PRICE: {price}")
+    print(f"📊 STRENGTH: {strength}%")
+    print(f"👆 TOUCHES: {touches}")
+    print(f"⏰ TIMEFRAME: {timeframe}")
+    print(f"📈 DIRECTION: {'🔴 BEARISH (SELL)' if is_bearish else '🟢 BULLISH (BUY)'}")
+    print(f"{'='*50}")
+    print(f"🎯 AI SETUP QUALITY: {setup_quality:.1f}%")
+    print(f"📋 RECOMMENDATION: {recommendation['action']}")
+    print(f"📊 CONFIDENCE: {recommendation['confidence']}")
+    print(f"⚠️ RISK LEVEL: {recommendation['risk_level']}")
+    print(f"💡 SUGGESTION: {recommendation['suggestion']}")
+    print(f"{'='*50}\n")
     
     # Return response
     response = {
@@ -297,7 +297,8 @@ def webhook():
             "strength": strength,
             "touches": touches,
             "price": price,
-            "is_bearish": is_bearish
+            "is_bearish": is_bearish,
+            "timeframe": timeframe
         },
         "timestamp": datetime.now().isoformat()
     }
