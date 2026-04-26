@@ -7,7 +7,7 @@ import os
 from sklearn.ensemble import RandomForestRegressor
 from sklearn.preprocessing import StandardScaler
 import pickle
-import hashlib
+from collections import deque
 
 app = Flask(__name__)
 
@@ -23,11 +23,102 @@ TRADE_LOG_FILE = "trade_log.json"
 model = None
 scaler = None
 trade_history = []
+flow_history = deque(maxlen=100)
 
 # Load trade history if exists
 if os.path.exists(TRADE_LOG_FILE):
     with open(TRADE_LOG_FILE, 'r') as f:
         trade_history = json.load(f)
+
+# ====================================================
+# BUYER/SELLER FLOW DETECTION ENGINE
+# ====================================================
+
+class FlowDetector:
+    """Detects whether buyers or sellers are in control"""
+    
+    def __init__(self):
+        self.volume_history = deque(maxlen=20)
+        self.flow_scores = deque(maxlen=10)
+    
+    def analyze_flow(self, volume_score, price_change, is_bearish_zone):
+        """
+        Analyze market flow to determine who is in control
+        
+        Parameters:
+        - volume_score: 0-100 volume intensity
+        - price_change: recent price movement (positive = up, negative = down)
+        - is_bearish_zone: True for sell zones, False for buy zones
+        
+        Returns:
+        - flow: "BUYERS", "SELLERS", or "NEUTRAL"
+        - flow_strength: 0-100 how strong the flow is
+        - explanation: text explanation
+        """
+        
+        # Determine price direction
+        price_up = price_change > 0
+        price_down = price_change < 0
+        
+        # Calculate flow score
+        flow_score = 0
+        
+        if price_up and volume_score > 50:
+            flow_score = volume_score  # Buyers strength
+        elif price_down and volume_score > 50:
+            flow_score = -volume_score  # Sellers strength
+        elif volume_score <= 50:
+            flow_score = volume_score * 0.1  # Weak/neutral
+        
+        # Add to history
+        self.flow_scores.append(flow_score)
+        
+        # Determine average flow
+        avg_flow = sum(self.flow_scores) / len(self.flow_scores) if self.flow_scores else 0
+        
+        # Determine who is in control
+        if avg_flow > 20:
+            flow = "BUYERS"
+            flow_strength = min(abs(avg_flow), 100)
+            flow_emoji = "🟢"
+        elif avg_flow < -20:
+            flow = "SELLERS"
+            flow_strength = min(abs(avg_flow), 100)
+            flow_emoji = "🔴"
+        else:
+            flow = "NEUTRAL"
+            flow_strength = abs(avg_flow)
+            flow_emoji = "🟡"
+        
+        # Generate explanation
+        if flow == "BUYERS":
+            explanation = f"Buyers are in control ({flow_strength:.0f}% strength). Volume confirms upward pressure."
+            if is_bearish_zone:
+                advice = "⚠️ CONFLICT: Bearish zone but buyers are leading - wait for seller confirmation"
+            else:
+                advice = "✅ CONFIRMATION: Bullish zone with buyer dominance - good setup"
+        elif flow == "SELLERS":
+            explanation = f"Sellers are in control ({flow_strength:.0f}% strength). Volume confirms downward pressure."
+            if is_bearish_zone:
+                advice = "✅ CONFIRMATION: Bearish zone with seller dominance - good setup"
+            else:
+                advice = "⚠️ CONFLICT: Bullish zone but sellers are leading - wait for buyer confirmation"
+        else:
+            explanation = f"Market is neutral ({flow_strength:.0f}% strength). No clear dominant side."
+            advice = "⏳ WAIT: Let the market show direction before entering"
+        
+        return {
+            "flow": flow,
+            "flow_emoji": flow_emoji,
+            "flow_strength": round(flow_strength, 1),
+            "flow_score": round(avg_flow, 1),
+            "explanation": explanation,
+            "advice": advice,
+            "confluence": (flow == "SELLERS" and is_bearish_zone) or (flow == "BUYERS" and not is_bearish_zone)
+        }
+
+# Initialize flow detector
+flow_detector = FlowDetector()
 
 # ====================================================
 # INTELLIGENT ASSISTANT LAYER
@@ -40,8 +131,8 @@ class TradingAssistant:
         self.conversation_history = []
         self.active_zones = {}
     
-    def analyze_zone(self, zone_data):
-        """Comprehensive zone analysis with natural language"""
+    def analyze_zone(self, zone_data, flow_data):
+        """Comprehensive zone analysis with natural language and flow"""
         
         strength = zone_data.get('strength', 0)
         touches = zone_data.get('touches', 0)
@@ -72,35 +163,59 @@ class TradingAssistant:
         zone_range = zone_high - zone_low
         stop_loss = zone_high + (zone_range * 0.5) if is_bearish else zone_low - (zone_range * 0.5)
         risk = abs(price - stop_loss)
-        reward = risk * 2  # Assume 2:1 reward ratio
+        reward = risk * 2
         rr_ratio = reward / risk if risk > 0 else 0
         
-        # Generate natural language explanation
+        # Combine zone analysis with flow analysis
+        flow = flow_data['flow']
+        flow_strength = flow_data['flow_strength']
+        flow_confluence = flow_data['confluence']
+        
+        # Final decision based on both zone and flow
+        if zone_status == "REJECTING" and flow_confluence:
+            final_action = "STRONG_ENTRY"
+            final_emoji = "🚀"
+            confidence = min(100, strength + flow_strength)
+        elif zone_status == "REJECTING" and not flow_confluence:
+            final_action = "CONFLICT_ENTRY"
+            final_emoji = "⚠️"
+            confidence = min(100, strength * 0.6)
+        elif zone_status == "ABSORBING":
+            final_action = "WAIT"
+            final_emoji = "⏳"
+            confidence = 30
+        else:
+            final_action = "MONITOR"
+            final_emoji = "👀"
+            confidence = 50
+        
+        # Generate explanation with flow data
         explanation = self._generate_explanation(
             strength, touches, zone_status, is_bearish, 
-            volume_score, timeframe, rr_ratio
+            volume_score, timeframe, rr_ratio, flow, flow_strength
         )
         
-        # Generate actionable advice
-        advice = self._generate_advice(action, zone_status, strength, touches)
-        
-        # Calculate confidence score
-        confidence = self._calculate_confidence(strength, touches, volume_score, zone_status)
+        # Generate advice with flow data
+        advice = self._generate_advice(final_action, zone_status, strength, touches, flow)
         
         return {
             "zone_status": zone_status,
             "status_emoji": status_emoji,
-            "action": action,
+            "action": final_action,
+            "action_emoji": final_emoji,
             "explanation": explanation,
             "advice": advice,
             "confidence": confidence,
             "stop_loss": stop_loss,
             "risk_reward": f"1:{rr_ratio:.1f}",
-            "entry_price": price if action == "SELL" or action == "BUY" else None
+            "entry_price": price if final_action == "STRONG_ENTRY" else None,
+            "flow_confluence": flow_confluence,
+            "flow": flow,
+            "flow_strength": flow_strength
         }
     
-    def _generate_explanation(self, strength, touches, zone_status, is_bearish, volume_score, timeframe, rr_ratio):
-        """Generate human-readable explanation"""
+    def _generate_explanation(self, strength, touches, zone_status, is_bearish, volume_score, timeframe, rr_ratio, flow, flow_strength):
+        """Generate human-readable explanation with flow data"""
         
         direction = "bearish (sell)" if is_bearish else "bullish (buy)"
         
@@ -110,8 +225,9 @@ class TradingAssistant:
    • This is a {strength}% strength {direction} zone on the {timeframe}min timeframe.
    • Price has broken BELOW the zone - this is a REJECTION signal.
    • The zone has been tested {touches} time(s).
-   • Volume score is {volume_score}/100, {'confirming the move' if volume_score > 60 else 'low - be cautious'}.
+   • Volume score is {volume_score}/100.
    • Risk/Reward ratio is 1:{rr_ratio:.1f}.
+   • Market Flow: {flow} ({flow_strength:.0f}% strength)
 """
         elif zone_status == "ABSORBING":
             explanation = f"""
@@ -120,7 +236,8 @@ class TradingAssistant:
    • Price is holding ABOVE the zone - this is ABSORPTION, not rejection.
    • Buyers are absorbing seller pressure, invalidating the short setup.
    • The zone has been tested {touches} time(s) but is not breaking.
-   • Volume score is {volume_score}/100 - {'confirming absorption' if volume_score > 60 else 'low - unclear'}.
+   • Volume score is {volume_score}/100.
+   • Market Flow: {flow} ({flow_strength:.0f}% strength)
 """
         else:
             explanation = f"""
@@ -130,69 +247,47 @@ class TradingAssistant:
    • A confirmed trade requires price to close BELOW {'the zone' if is_bearish else 'above the zone'}.
    • The zone has been tested {touches} time(s).
    • Volume score is {volume_score}/100.
+   • Market Flow: {flow} ({flow_strength:.0f}% strength)
 """
         
         return explanation.strip()
     
-    def _generate_advice(self, action, zone_status, strength, touches):
-        """Generate actionable trading advice"""
+    def _generate_advice(self, action, zone_status, strength, touches, flow):
+        """Generate actionable trading advice with flow"""
         
-        if action == "SELL":
+        if action == "STRONG_ENTRY":
             return f"""
 💡 ACTIONABLE ADVICE:
-   ✅ SHORT POSITION: Enter now or on retest of zone
-   🛑 STOP LOSS: Place stop loss ABOVE the zone
-   🎯 TAKE PROFIT: Target the next support level below
-   📊 POSITION SIZE: Use {'full' if strength > 70 else 'half'} position size
-   ⚠️ NOTE: {'Zone has been tested ' + str(touches) + ' times - may weaken' if touches > 0 else 'Fresh zone - good'}"""
+   ✅ ENTRY: {'SHORT' if 'bearish' in str(action) else 'LONG'} position
+   🛑 STOP LOSS: Place {'above' if 'bearish' in str(action) else 'below'} the zone
+   🎯 TAKE PROFIT: Next {'support' if 'bearish' in str(action) else 'resistance'} level
+   📊 SIZE: Full position (high confidence)
+   🔄 FLOW: {flow} - aligns with trade direction"""
         
-        elif action == "BUY":
+        elif action == "CONFLICT_ENTRY":
             return f"""
 💡 ACTIONABLE ADVICE:
-   ✅ LONG POSITION: Enter now or on retest of zone
-   🛑 STOP LOSS: Place stop loss BELOW the zone
-   🎯 TAKE PROFIT: Target the next resistance level above
-   📊 POSITION SIZE: Use {'full' if strength > 70 else 'half'} position size
-   ⚠️ NOTE: {'Zone has been tested ' + str(touches) + ' times - may weaken' if touches > 0 else 'Fresh zone - good'}"""
+   ⚠️ REDUCED ENTRY: Half position only
+   🛑 STOP LOSS: Wider than normal (2x zone width)
+   📊 SIZE: Half position (conflicting signals)
+   🔄 FLOW: {flow} - conflicts with zone direction
+   👀 WAIT: Until flow aligns with zone"""
         
         elif action == "WAIT":
             return f"""
 💡 ACTIONABLE ADVICE:
-   ⏳ DO NOT ENTER: Price is absorbing, not rejecting
-   👀 WHAT TO WATCH: Wait for price to close BELOW the zone
-   📊 POSITION SIZE: Prepare reduced position (half size) for confirmation trade
-   🔄 REASSESS: Check flow indicator - needs sellers in control"""
+   ⏳ DO NOT ENTER: Price absorbing, not rejecting
+   👀 WATCH FOR: Close {'BELOW' if 'bearish' in str(action) else 'ABOVE'} zone
+   🔄 FLOW: {flow}
+   📊 PREPARE: Have stop loss ready for confirmation"""
         
-        else:  # MONITOR
+        else:
             return f"""
 💡 ACTIONABLE ADVICE:
    👀 MONITOR ONLY: No entry yet
-   🔍 WATCH FOR: Price to close {'BELOW' if 'bearish' in action else 'ABOVE'} the zone
-   📊 PREPARE: Have your stop loss and target levels ready
-   ⏰ TIMING: Wait for candle close for confirmation"""
-    
-    def _calculate_confidence(self, strength, touches, volume_score, zone_status):
-        """Calculate confidence score (0-100)"""
-        score = 0
-        
-        # Strength contributes (max 40)
-        score += min(strength * 0.4, 40)
-        
-        # Volume contributes (max 20)
-        score += min(volume_score * 0.2, 20)
-        
-        # Zone status contributes
-        if zone_status == "REJECTING":
-            score += 25
-        elif zone_status == "INSIDE":
-            score += 10
-        else:
-            score += 0
-        
-        # Touch penalty (zones lose power after multiple touches)
-        score -= min(touches * 5, 20)
-        
-        return min(max(score, 0), 100)
+   🔍 WATCH: Price movement and candle closes
+   🔄 FLOW: {flow}
+   ⏰ TIMING: Wait for breakout confirmation"""
     
     def log_trade(self, zone_data, decision, result=None):
         """Log trade for performance tracking"""
@@ -203,11 +298,12 @@ class TradingAssistant:
             "price": zone_data.get('price'),
             "decision": decision.get('action'),
             "confidence": decision.get('confidence'),
-            "result": result  # 'win', 'loss', or None
+            "flow": decision.get('flow', 'UNKNOWN'),
+            "flow_confluence": decision.get('flow_confluence', False),
+            "result": result
         }
         trade_history.append(trade_record)
         
-        # Save to file
         with open(TRADE_LOG_FILE, 'w') as f:
             json.dump(trade_history, f, indent=2)
         
@@ -217,7 +313,7 @@ class TradingAssistant:
 assistant = TradingAssistant()
 
 # ====================================================
-# TRAINING FUNCTIONS (kept from original)
+# TRAINING FUNCTIONS
 # ====================================================
 
 def train_setup_predictor():
@@ -332,12 +428,12 @@ def predict_setup_quality(features_dict):
     return min(100, max(0, quality))
 
 # ====================================================
-# WEBHOOK ENDPOINT with INTELLIGENT ASSISTANT
+# WEBHOOK ENDPOINT with FLOW DETECTION
 # ====================================================
 
 @app.route('/webhook', methods=['POST'])
 def webhook():
-    """Receive zone data and return AI prediction with intelligent assistant"""
+    """Receive zone data and return AI prediction with intelligent assistant and flow detection"""
     
     data = request.get_json()
     
@@ -345,7 +441,7 @@ def webhook():
         return jsonify({"status": "error", "message": "Unauthorized"}), 401
     
     print("\n" + "="*70)
-    print("🤖 INTELLIGENT TRADING ASSISTANT")
+    print("🤖 INTELLIGENT TRADING ASSISTANT WITH FLOW DETECTION")
     print("="*70)
     print(f"📡 Alert received at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     
@@ -362,6 +458,9 @@ def webhook():
     # Zone boundaries
     zone_high = data.get('zone_high', price * 1.002)
     zone_low = data.get('zone_low', price * 0.998)
+    
+    # Calculate price change (for flow detection)
+    price_change = data.get('price_change', 0.0001)
     
     # Time features
     now = datetime.now()
@@ -380,16 +479,31 @@ def webhook():
     # Get AI prediction
     setup_quality = predict_setup_quality(features)
     
-    # Get assistant analysis
+    # Analyze flow
+    flow_data = flow_detector.analyze_flow(volume_score, price_change, is_bearish)
+    
+    # Get assistant analysis with flow data
     zone_data_for_assistant = {
         'strength': strength, 'touches': touches, 'is_bearish': is_bearish,
         'price': price, 'timeframe': timeframe, 'volume_score': volume_score,
         'zone_high': zone_high, 'zone_low': zone_low
     }
     
-    assistant_decision = assistant.analyze_zone(zone_data_for_assistant)
+    assistant_decision = assistant.analyze_zone(zone_data_for_assistant, flow_data)
     
-    # Print assistant output
+    # Print flow analysis
+    print(f"""
+    {'='*70}
+    🌊 MARKET FLOW ANALYSIS
+    {'='*70}
+    {flow_data['flow_emoji']} WHO'S IN CONTROL: {flow_data['flow']}
+    📊 FLOW STRENGTH: {flow_data['flow_strength']}%
+    📝 EXPLANATION: {flow_data['explanation']}
+    ⚡ ADVICE: {flow_data['advice']}
+    🔄 FLOW ALIGNMENT: {'✅ YES (Confluence)' if flow_data['confluence'] else '❌ NO (Conflict)'}
+    """)
+    
+    # Print zone summary
     print(f"""
     {'='*70}
     📊 ZONE SUMMARY
@@ -408,10 +522,11 @@ def webhook():
     {'='*70}
     🎯 FINAL VERDICT
     {'='*70}
-    {assistant_decision['status_emoji']} Action: {assistant_decision['action']}
+    {assistant_decision['action_emoji']} Action: {assistant_decision['action']}
     📊 Confidence: {assistant_decision['confidence']:.1f}%
     🤖 AI Setup Quality: {setup_quality:.1f}%
     ⚠️ Risk/Reward: {assistant_decision['risk_reward']}
+    🔄 Flow Alignment: {'✅ YES' if assistant_decision['flow_confluence'] else '❌ NO'}
     """)
     
     if assistant_decision['stop_loss']:
@@ -426,13 +541,15 @@ def webhook():
     response = {
         "status": "success",
         "setup_quality": round(setup_quality, 1),
+        "flow_analysis": flow_data,
         "assistant": {
             "action": assistant_decision['action'],
             "confidence": assistant_decision['confidence'],
             "explanation": assistant_decision['explanation'],
             "advice": assistant_decision['advice'],
             "stop_loss": assistant_decision['stop_loss'],
-            "risk_reward": assistant_decision['risk_reward']
+            "risk_reward": assistant_decision['risk_reward'],
+            "flow_confluence": assistant_decision['flow_confluence']
         },
         "timestamp": datetime.now().isoformat()
     }
@@ -455,11 +572,13 @@ def dashboard():
             .win { color: #00ff00; }
             .loss { color: #ff4444; }
             .pending { color: #ffaa00; }
+            .buyers { color: #00ff00; }
+            .sellers { color: #ff4444; }
         </style>
     </head>
     <body>
         <h1>🤖 Trading Assistant Dashboard</h1>
-        <h2>Trade History</h2>
+        <h2>Trade History with Flow Analysis</h2>
         <table>
             <tr>
                 <th>Time</th>
@@ -467,6 +586,8 @@ def dashboard():
                 <th>Direction</th>
                 <th>Decision</th>
                 <th>Confidence</th>
+                <th>Flow</th>
+                <th>Confluence</th>
                 <th>Result</th>
             </tr>
             {% for trade in trades %}
@@ -476,6 +597,8 @@ def dashboard():
                 <td>{{ trade.direction }}</td>
                 <td>{{ trade.decision }}</td>
                 <td>{{ trade.confidence }}%</td>
+                <td class="{{ 'buyers' if trade.flow == 'BUYERS' else 'sellers' if trade.flow == 'SELLERS' else 'neutral' }}">{{ trade.flow or 'N/A' }}</td>
+                <td>{{ '✅' if trade.flow_confluence else '❌' }}</td>
                 <td class="{{ trade.result if trade.result else 'pending' }}">{{ trade.result or 'Pending' }}</td>
             </tr>
             {% endfor %}
@@ -483,7 +606,7 @@ def dashboard():
         <p>Total Trades: {{ trades|length }}</p>
     </body>
     </html>
-    ''', trades=trade_history[-50:])  # Show last 50 trades
+    ''', trades=trade_history[-50:])
 
 @app.route('/health', methods=['GET'])
 def health():
@@ -501,14 +624,15 @@ def train():
 
 if __name__ == '__main__':
     print("="*70)
-    print("🤖 MONEY GLITCH AI - INTELLIGENT TRADING ASSISTANT")
+    print("🤖 MONEY GLITCH AI - WITH BUYER/SELLER FLOW DETECTION")
     print("="*70)
     print("Features enabled:")
+    print("  ✅ Buyer/Seller flow detection")
+    print("  ✅ Flow strength scoring")
+    print("  ✅ Confluence analysis (flow + zone)")
     print("  ✅ Natural language explanations")
     print("  ✅ Actionable trading advice")
-    print("  ✅ Trade logging and history")
-    print("  ✅ Confidence scoring")
-    print("  ✅ Risk/Reward calculation")
+    print("  ✅ Trade logging with flow data")
     print("="*70)
     
     if os.path.exists(MODEL_FILE):
@@ -520,7 +644,7 @@ if __name__ == '__main__':
     else:
         train_setup_predictor()
     
-    print(f"\n🚀 Starting Flask server on port 5000...")
+    print("\n🚀 Starting Flask server on port 5000...")
     print("📡 Webhook endpoint: http://localhost:5000/webhook")
     print("📊 Dashboard: http://localhost:5000/dashboard")
     print("🔒 Security token: " + SECRET_TOKEN)
