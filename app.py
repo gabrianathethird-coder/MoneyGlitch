@@ -1,7 +1,7 @@
 import json
 import numpy as np
 import pandas as pd
-from flask import Flask, request, jsonify, render_template_string
+from flask import Flask, request, jsonify
 from datetime import datetime
 import os
 from sklearn.ensemble import RandomForestRegressor
@@ -121,18 +121,124 @@ class FlowDetector:
 flow_detector = FlowDetector()
 
 # ====================================================
-# INTELLIGENT ASSISTANT LAYER
+# INSTITUTIONAL DETECTION ENGINE
+# ====================================================
+
+class InstitutionalDetector:
+    """Detects institutional footprints in market activity"""
+    
+    def __init__(self):
+        self.inst_zones = []
+        self.volume_history = deque(maxlen=50)
+    
+    def analyze_candle(self, volume, high, low, close, open_price, is_bullish, is_bearish):
+        """
+        Analyze a candle for institutional footprints
+        
+        Returns:
+        - is_institutional: Boolean
+        - inst_type: "INSTITUTIONAL_BUY", "INSTITUTIONAL_SELL", or "REGULAR"
+        - volume_climax: Boolean
+        - pattern: String description
+        """
+        
+        # Calculate average volume
+        self.volume_history.append(volume)
+        avg_volume = sum(self.volume_history) / len(self.volume_history) if self.volume_history else volume
+        volume_multiplier = volume / avg_volume if avg_volume > 0 else 1
+        
+        # Volume climax detection
+        is_climax = volume_multiplier >= 1.5
+        
+        # Wick analysis
+        candle_range = high - low
+        if candle_range > 0:
+            upper_wick_pct = ((high - max(open_price, close)) / candle_range) * 100 if candle_range > 0 else 0
+            lower_wick_pct = ((min(open_price, close) - low) / candle_range) * 100 if candle_range > 0 else 0
+            body_pct = 100 - (upper_wick_pct + lower_wick_pct)
+        else:
+            upper_wick_pct = 0
+            lower_wick_pct = 0
+            body_pct = 100
+        
+        # Rejection detection
+        has_rejection = upper_wick_pct > 60 or lower_wick_pct > 60
+        
+        # Body dominance detection (institutional control)
+        is_imbalance = body_pct > 60
+        
+        # Calculate institutional score
+        score = 0
+        if is_climax:
+            score += 1
+        if has_rejection:
+            score += 1
+        if is_imbalance:
+            score += 1
+        
+        is_institutional = score >= 2
+        
+        # Determine institutional type
+        if is_institutional:
+            if is_bullish:
+                inst_type = "INSTITUTIONAL_BUY"
+                pattern = "High-volume bullish rejection + body dominance" if has_rejection and is_imbalance else "Volume climax with bullish structure"
+            elif is_bearish:
+                inst_type = "INSTITUTIONAL_SELL"
+                pattern = "High-volume bearish rejection + body dominance" if has_rejection and is_imbalance else "Volume climax with bearish structure"
+            else:
+                inst_type = "INSTITUTIONAL_NEUTRAL"
+                pattern = "Volume climax but direction unclear"
+        else:
+            inst_type = "REGULAR"
+            pattern = "Normal market activity"
+        
+        # Create detailed analysis
+        analysis = {
+            "is_institutional": is_institutional,
+            "inst_type": inst_type,
+            "inst_type_display": "🏦 INSTITUTIONAL" if is_institutional else "👤 REGULAR",
+            "volume_climax": is_climax,
+            "volume_multiplier": round(volume_multiplier, 2),
+            "pattern": pattern,
+            "has_rejection": has_rejection,
+            "is_imbalance": is_imbalance,
+            "upper_wick_pct": round(upper_wick_pct, 1),
+            "lower_wick_pct": round(lower_wick_pct, 1),
+            "body_pct": round(body_pct, 1),
+            "score": score
+        }
+        
+        # Store institutional zones for future reference
+        if is_institutional:
+            self.inst_zones.append({
+                "timestamp": datetime.now().isoformat(),
+                "type": inst_type,
+                "volume_multiplier": volume_multiplier
+            })
+            if len(self.inst_zones) > 100:
+                self.inst_zones.pop(0)
+        
+        return analysis
+
+# Initialize institutional detector
+inst_detector = InstitutionalDetector()
+
+# ====================================================
+# INTELLIGENT ASSISTANT LAYER WITH INSTITUTIONAL DATA
 # ====================================================
 
 class TradingAssistant:
-    """AI-powered trading assistant that explains decisions"""
+    """AI-powered trading assistant that explains decisions with institutional context"""
     
     def __init__(self):
         self.conversation_history = []
         self.active_zones = {}
+        self.inst_zones = []
+        self.regular_zones = []
     
-    def analyze_zone(self, zone_data, flow_data):
-        """Comprehensive zone analysis with natural language and flow"""
+    def analyze_zone(self, zone_data, flow_data, inst_data):
+        """Comprehensive zone analysis with natural language, flow, and institutional data"""
         
         strength = zone_data.get('strength', 0)
         touches = zone_data.get('touches', 0)
@@ -141,9 +247,10 @@ class TradingAssistant:
         timeframe = zone_data.get('timeframe', '15')
         volume_score = zone_data.get('volume_score', 50)
         
-        # Get zone boundaries (from webhook or estimate)
+        # Get zone boundaries
         zone_high = zone_data.get('zone_high', price * 1.002)
         zone_low = zone_data.get('zone_low', price * 0.998)
+        zone_range = zone_high - zone_low
         
         # Determine zone status
         if price < zone_low:
@@ -159,125 +266,198 @@ class TradingAssistant:
             status_emoji = "⏳"
             action = "MONITOR"
         
-        # Calculate risk metrics
-        zone_range = zone_high - zone_low
+        # Risk metrics
         stop_loss = zone_high + (zone_range * 0.5) if is_bearish else zone_low - (zone_range * 0.5)
         risk = abs(price - stop_loss)
         reward = risk * 2
         rr_ratio = reward / risk if risk > 0 else 0
         
-        # Combine zone analysis with flow analysis
+        # Entry price suggestions
+        if is_bearish:
+            primary_entry = zone_low
+            aggressive_entry = price if price < zone_high else zone_high
+            conservative_entry = zone_low - (zone_range * 0.2)
+        else:
+            primary_entry = zone_high
+            aggressive_entry = price if price > zone_low else zone_low
+            conservative_entry = zone_high + (zone_range * 0.2)
+        
+        # Combine flow and institutional data
         flow = flow_data['flow']
         flow_strength = flow_data['flow_strength']
         flow_confluence = flow_data['confluence']
         
-        # Final decision based on both zone and flow
+        is_institutional = inst_data['is_institutional']
+        inst_type = inst_data['inst_type']
+        volume_climax = inst_data['volume_climax']
+        volume_multiplier = inst_data['volume_multiplier']
+        inst_pattern = inst_data['pattern']
+        
+        # Calculate conviction boost
+        conviction_boost = 15 if is_institutional else 0
+        
+        # Final decision based on zone, flow, and institutional data
         if zone_status == "REJECTING" and flow_confluence:
-            final_action = "STRONG_ENTRY"
-            final_emoji = "🚀"
-            confidence = min(100, strength + flow_strength)
+            if is_institutional:
+                final_action = "STRONG_ENTRY"
+                final_emoji = "🚀"
+                conviction = "EXTREME"
+                confidence = min(100, strength + flow_strength + conviction_boost)
+            else:
+                final_action = "STRONG_ENTRY"
+                final_emoji = "📈"
+                conviction = "HIGH"
+                confidence = min(100, strength + flow_strength)
+            recommended_entry = primary_entry
         elif zone_status == "REJECTING" and not flow_confluence:
-            final_action = "CONFLICT_ENTRY"
-            final_emoji = "⚠️"
-            confidence = min(100, strength * 0.6)
+            if is_institutional:
+                final_action = "CONFLICT_ENTRY"
+                final_emoji = "⚠️"
+                conviction = "MEDIUM"
+                confidence = min(100, strength * 0.6 + conviction_boost)
+            else:
+                final_action = "CONFLICT_ENTRY"
+                final_emoji = "⚠️"
+                conviction = "LOW"
+                confidence = min(100, strength * 0.6)
+            recommended_entry = aggressive_entry
         elif zone_status == "ABSORBING":
             final_action = "WAIT"
             final_emoji = "⏳"
+            conviction = "NONE"
             confidence = 30
+            recommended_entry = None
         else:
             final_action = "MONITOR"
             final_emoji = "👀"
+            conviction = "NONE"
             confidence = 50
+            recommended_entry = None
         
-        # Generate explanation with flow data
+        # Generate explanations
         explanation = self._generate_explanation(
             strength, touches, zone_status, is_bearish, 
-            volume_score, timeframe, rr_ratio, flow, flow_strength
+            volume_score, timeframe, rr_ratio, flow, flow_strength,
+            is_institutional, inst_pattern, volume_climax, volume_multiplier
         )
         
-        # Generate advice with flow data
-        advice = self._generate_advice(final_action, zone_status, strength, touches, flow)
+        advice = self._generate_advice(
+            final_action, zone_status, strength, touches, flow, 
+            recommended_entry, primary_entry, aggressive_entry, 
+            conservative_entry, stop_loss, is_institutional, conviction
+        )
         
         return {
             "zone_status": zone_status,
             "status_emoji": status_emoji,
             "action": final_action,
             "action_emoji": final_emoji,
+            "conviction": conviction,
             "explanation": explanation,
             "advice": advice,
             "confidence": confidence,
             "stop_loss": stop_loss,
             "risk_reward": f"1:{rr_ratio:.1f}",
-            "entry_price": price if final_action == "STRONG_ENTRY" else None,
+            "entry_price": recommended_entry,
+            "primary_entry": primary_entry,
+            "aggressive_entry": aggressive_entry,
+            "conservative_entry": conservative_entry,
             "flow_confluence": flow_confluence,
             "flow": flow,
-            "flow_strength": flow_strength
+            "flow_strength": flow_strength,
+            "is_institutional": is_institutional,
+            "inst_type": inst_type,
+            "volume_climax": volume_climax,
+            "volume_multiplier": volume_multiplier,
+            "inst_pattern": inst_pattern
         }
     
-    def _generate_explanation(self, strength, touches, zone_status, is_bearish, volume_score, timeframe, rr_ratio, flow, flow_strength):
-        """Generate human-readable explanation with flow data"""
+    def _generate_explanation(self, strength, touches, zone_status, is_bearish, volume_score, timeframe, rr_ratio, flow, flow_strength, is_institutional, inst_pattern, volume_climax, volume_multiplier):
+        """Generate human-readable explanation with institutional data"""
         
         direction = "bearish (sell)" if is_bearish else "bullish (buy)"
+        inst_prefix = "🏦 INSTITUTIONAL: " if is_institutional else ""
         
         if zone_status == "REJECTING":
             explanation = f"""
 🔍 ZONE ANALYSIS:
-   • This is a {strength}% strength {direction} zone on the {timeframe}min timeframe.
-   • Price has broken BELOW the zone - this is a REJECTION signal.
-   • The zone has been tested {touches} time(s).
-   • Volume score is {volume_score}/100.
-   • Risk/Reward ratio is 1:{rr_ratio:.1f}.
+   • {strength}% strength {direction} zone on {timeframe}min timeframe
+   • Price broke BELOW the zone - REJECTION confirmed
+   • Tested {touches} time(s)
+   • Volume score: {volume_score}/100
+   {f'   • VOLUME CLIMAX: {volume_multiplier}x average' if volume_climax else ''}
+   • Risk/Reward: 1:{rr_ratio:.1f}
    • Market Flow: {flow} ({flow_strength:.0f}% strength)
+   • {inst_prefix}{inst_pattern}
 """
         elif zone_status == "ABSORBING":
             explanation = f"""
 🔍 ZONE ANALYSIS:
-   • This is a {strength}% strength {direction} zone on the {timeframe}min timeframe.
-   • Price is holding ABOVE the zone - this is ABSORPTION, not rejection.
-   • Buyers are absorbing seller pressure, invalidating the short setup.
-   • The zone has been tested {touches} time(s) but is not breaking.
-   • Volume score is {volume_score}/100.
+   • {strength}% strength {direction} zone on {timeframe}min timeframe
+   • Price is ABOVE the zone - ABSORPTION happening
+   • Buyers absorbing pressure - invalidates setup
+   • Volume score: {volume_score}/100
    • Market Flow: {flow} ({flow_strength:.0f}% strength)
+   • {inst_prefix}{inst_pattern}
 """
         else:
             explanation = f"""
 🔍 ZONE ANALYSIS:
-   • This is a {strength}% strength {direction} zone on the {timeframe}min timeframe.
-   • Price is currently INSIDE the zone - waiting for a breakout.
-   • A confirmed trade requires price to close BELOW {'the zone' if is_bearish else 'above the zone'}.
-   • The zone has been tested {touches} time(s).
-   • Volume score is {volume_score}/100.
+   • {strength}% strength {direction} zone on {timeframe}min timeframe
+   • Price INSIDE zone - waiting for breakout
+   • Need close {'BELOW' if is_bearish else 'ABOVE'} for entry
+   • Volume score: {volume_score}/100
    • Market Flow: {flow} ({flow_strength:.0f}% strength)
+   • {inst_prefix}{inst_pattern}
 """
         
         return explanation.strip()
     
-    def _generate_advice(self, action, zone_status, strength, touches, flow):
-        """Generate actionable trading advice with flow"""
+    def _generate_advice(self, action, zone_status, strength, touches, flow, recommended_entry, primary_entry, aggressive_entry, conservative_entry, stop_loss, is_institutional, conviction):
+        """Generate actionable trading advice with institutional context"""
         
         if action == "STRONG_ENTRY":
             return f"""
 💡 ACTIONABLE ADVICE:
    ✅ ENTRY: {'SHORT' if 'bearish' in str(action) else 'LONG'} position
-   🛑 STOP LOSS: Place {'above' if 'bearish' in str(action) else 'below'} the zone
-   🎯 TAKE PROFIT: Next {'support' if 'bearish' in str(action) else 'resistance'} level
-   📊 SIZE: Full position (high confidence)
-   🔄 FLOW: {flow} - aligns with trade direction"""
+   📊 CONVICTION: {conviction}
+   📍 ENTRY PRICE: {recommended_entry:.5f}
+   
+   🎯 ENTRY OPTIONS:
+      • Primary Entry: {primary_entry:.5f} (breakout confirmation)
+      • Aggressive Entry: {aggressive_entry:.5f} (early entry)
+      • Conservative Entry: {conservative_entry:.5f} (wait for follow-through)
+   
+   🛑 STOP LOSS: {stop_loss:.5f}
+   📊 POSITION SIZE: Full ({conviction} conviction)
+   🔄 FLOW: {flow} - aligns with trade direction
+   {f'🏦 INSTITUTIONAL: YES - High confidence trade' if is_institutional else ''}"""
         
         elif action == "CONFLICT_ENTRY":
             return f"""
 💡 ACTIONABLE ADVICE:
    ⚠️ REDUCED ENTRY: Half position only
-   🛑 STOP LOSS: Wider than normal (2x zone width)
+   📊 CONVICTION: {conviction}
+   📍 ENTRY PRICE: {recommended_entry:.5f} (if taken)
+   
+   🎯 ENTRY OPTIONS:
+      • Aggressive Entry: {aggressive_entry:.5f}
+      • Conservative Entry: {conservative_entry:.5f}
+   
+   🛑 STOP LOSS: {stop_loss:.5f}
    📊 SIZE: Half position (conflicting signals)
    🔄 FLOW: {flow} - conflicts with zone direction
-   👀 WAIT: Until flow aligns with zone"""
+   👀 WAIT: For alignment for full position
+   {f'🏦 INSTITUTIONAL: YES - But flow conflict' if is_institutional else ''}"""
         
         elif action == "WAIT":
             return f"""
 💡 ACTIONABLE ADVICE:
    ⏳ DO NOT ENTER: Price absorbing, not rejecting
    👀 WATCH FOR: Close {'BELOW' if 'bearish' in str(action) else 'ABOVE'} zone
+   📍 PRICE LEVELS:
+      • Zone Entry: {primary_entry:.5f}
+      • Stop Loss: {stop_loss:.5f}
    🔄 FLOW: {flow}
    📊 PREPARE: Have stop loss ready for confirmation"""
         
@@ -286,6 +466,9 @@ class TradingAssistant:
 💡 ACTIONABLE ADVICE:
    👀 MONITOR ONLY: No entry yet
    🔍 WATCH: Price movement and candle closes
+   📍 KEY LEVELS:
+      • Zone Low: {primary_entry if 'bearish' else conservative_entry:.5f}
+      • Zone High: {conservative_entry if 'bearish' else primary_entry:.5f}
    🔄 FLOW: {flow}
    ⏰ TIMING: Wait for breakout confirmation"""
     
@@ -298,8 +481,13 @@ class TradingAssistant:
             "price": zone_data.get('price'),
             "decision": decision.get('action'),
             "confidence": decision.get('confidence'),
+            "conviction": decision.get('conviction'),
+            "entry_price": decision.get('entry_price'),
+            "stop_loss": decision.get('stop_loss'),
             "flow": decision.get('flow', 'UNKNOWN'),
             "flow_confluence": decision.get('flow_confluence', False),
+            "is_institutional": decision.get('is_institutional', False),
+            "inst_type": decision.get('inst_type', ''),
             "result": result
         }
         trade_history.append(trade_record)
@@ -428,12 +616,12 @@ def predict_setup_quality(features_dict):
     return min(100, max(0, quality))
 
 # ====================================================
-# WEBHOOK ENDPOINT with FLOW DETECTION
+# WEBHOOK ENDPOINT with INSTITUTIONAL DETECTION
 # ====================================================
 
 @app.route('/webhook', methods=['POST'])
 def webhook():
-    """Receive zone data and return AI prediction with intelligent assistant and flow detection"""
+    """Receive zone data and return AI prediction with institutional detection"""
     
     data = request.get_json()
     
@@ -441,7 +629,7 @@ def webhook():
         return jsonify({"status": "error", "message": "Unauthorized"}), 401
     
     print("\n" + "="*70)
-    print("🤖 INTELLIGENT TRADING ASSISTANT WITH FLOW DETECTION")
+    print("🤖 INTELLIGENT TRADING ASSISTANT WITH INSTITUTIONAL DETECTION")
     print("="*70)
     print(f"📡 Alert received at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     
@@ -482,14 +670,37 @@ def webhook():
     # Analyze flow
     flow_data = flow_detector.analyze_flow(volume_score, price_change, is_bearish)
     
-    # Get assistant analysis with flow data
+    # Analyze institutional footprint
+    simulated_volume = volume_score * 100
+    simulated_high = price + (candle_range / 2)
+    simulated_low = price - (candle_range / 2)
+    is_bullish = not is_bearish
+    
+    inst_data = inst_detector.analyze_candle(
+        simulated_volume, simulated_high, simulated_low, 
+        price, price, is_bullish, is_bearish
+    )
+    
+    # Get assistant analysis with flow and institutional data
     zone_data_for_assistant = {
         'strength': strength, 'touches': touches, 'is_bearish': is_bearish,
         'price': price, 'timeframe': timeframe, 'volume_score': volume_score,
         'zone_high': zone_high, 'zone_low': zone_low
     }
     
-    assistant_decision = assistant.analyze_zone(zone_data_for_assistant, flow_data)
+    assistant_decision = assistant.analyze_zone(zone_data_for_assistant, flow_data, inst_data)
+    
+    # Print institutional analysis
+    print(f"""
+    {'='*70}
+    🏦 INSTITUTIONAL FOOTPRINT DETECTION
+    {'='*70}
+    {inst_data['inst_type_display']}
+    📊 VOLUME CLIMAX: {'✅ YES' if inst_data['volume_climax'] else '❌ NO'} {f'({inst_data["volume_multiplier"]}x average)' if inst_data['volume_climax'] else ''}
+    🔍 PATTERN: {inst_data['pattern']}
+    📐 WICK ANALYSIS: Upper: {inst_data['upper_wick_pct']}% | Lower: {inst_data['lower_wick_pct']}% | Body: {inst_data['body_pct']}%
+    🏆 INSTITUTIONAL SCORE: {inst_data['score']}/3
+    """)
     
     # Print flow analysis
     print(f"""
@@ -508,7 +719,7 @@ def webhook():
     {'='*70}
     📊 ZONE SUMMARY
     {'='*70}
-    📍 Price: {price}
+    📍 Current Price: {price}
     📐 Zone: [{zone_low:.5f} - {zone_high:.5f}]
     💪 Strength: {strength}%
     👆 Touches: {touches}
@@ -523,14 +734,24 @@ def webhook():
     🎯 FINAL VERDICT
     {'='*70}
     {assistant_decision['action_emoji']} Action: {assistant_decision['action']}
+    📊 Conviction Level: {assistant_decision['conviction']}
     📊 Confidence: {assistant_decision['confidence']:.1f}%
     🤖 AI Setup Quality: {setup_quality:.1f}%
     ⚠️ Risk/Reward: {assistant_decision['risk_reward']}
     🔄 Flow Alignment: {'✅ YES' if assistant_decision['flow_confluence'] else '❌ NO'}
+    🏦 Institutional Backing: {'✅ CONFIRMED' if assistant_decision['is_institutional'] else '❌ NOT DETECTED'}
     """)
     
     if assistant_decision['stop_loss']:
         print(f"🛑 Suggested Stop Loss: {assistant_decision['stop_loss']:.5f}")
+    
+    if assistant_decision['entry_price']:
+        print(f"""
+    📍 ENTRY PRICE SUGGESTIONS:
+       • Primary Entry: {assistant_decision['primary_entry']:.5f}
+       • Aggressive Entry: {assistant_decision['aggressive_entry']:.5f}
+       • Conservative Entry: {assistant_decision['conservative_entry']:.5f}
+    """)
     
     print("="*70 + "\n")
     
@@ -542,71 +763,29 @@ def webhook():
         "status": "success",
         "setup_quality": round(setup_quality, 1),
         "flow_analysis": flow_data,
+        "institutional_analysis": inst_data,
         "assistant": {
             "action": assistant_decision['action'],
             "confidence": assistant_decision['confidence'],
+            "conviction": assistant_decision['conviction'],
             "explanation": assistant_decision['explanation'],
             "advice": assistant_decision['advice'],
             "stop_loss": assistant_decision['stop_loss'],
             "risk_reward": assistant_decision['risk_reward'],
-            "flow_confluence": assistant_decision['flow_confluence']
+            "entry_price": assistant_decision['entry_price'],
+            "primary_entry": assistant_decision['primary_entry'],
+            "aggressive_entry": assistant_decision['aggressive_entry'],
+            "conservative_entry": assistant_decision['conservative_entry'],
+            "flow_confluence": assistant_decision['flow_confluence'],
+            "is_institutional": assistant_decision['is_institutional'],
+            "inst_type": assistant_decision['inst_type'],
+            "volume_climax": assistant_decision['volume_climax'],
+            "volume_multiplier": assistant_decision['volume_multiplier']
         },
         "timestamp": datetime.now().isoformat()
     }
     
     return jsonify(response), 200
-
-@app.route('/dashboard', methods=['GET'])
-def dashboard():
-    """Simple web dashboard to see trade history"""
-    return render_template_string('''
-    <!DOCTYPE html>
-    <html>
-    <head>
-        <title>Trading Assistant Dashboard</title>
-        <style>
-            body { font-family: Arial; margin: 20px; background: #1a1a2e; color: white; }
-            table { border-collapse: collapse; width: 100%; margin-top: 20px; }
-            th, td { border: 1px solid #333; padding: 8px; text-align: left; }
-            th { background: #16213e; }
-            .win { color: #00ff00; }
-            .loss { color: #ff4444; }
-            .pending { color: #ffaa00; }
-            .buyers { color: #00ff00; }
-            .sellers { color: #ff4444; }
-        </style>
-    </head>
-    <body>
-        <h1>🤖 Trading Assistant Dashboard</h1>
-        <h2>Trade History with Flow Analysis</h2>
-        <table>
-            <tr>
-                <th>Time</th>
-                <th>Zone Strength</th>
-                <th>Direction</th>
-                <th>Decision</th>
-                <th>Confidence</th>
-                <th>Flow</th>
-                <th>Confluence</th>
-                <th>Result</th>
-            </tr>
-            {% for trade in trades %}
-            <tr>
-                <td>{{ trade.timestamp[:19] }}</td>
-                <td>{{ trade.zone_strength }}%</td>
-                <td>{{ trade.direction }}</td>
-                <td>{{ trade.decision }}</td>
-                <td>{{ trade.confidence }}%</td>
-                <td class="{{ 'buyers' if trade.flow == 'BUYERS' else 'sellers' if trade.flow == 'SELLERS' else 'neutral' }}">{{ trade.flow or 'N/A' }}</td>
-                <td>{{ '✅' if trade.flow_confluence else '❌' }}</td>
-                <td class="{{ trade.result if trade.result else 'pending' }}">{{ trade.result or 'Pending' }}</td>
-            </tr>
-            {% endfor %}
-        </table>
-        <p>Total Trades: {{ trades|length }}</p>
-    </body>
-    </html>
-    ''', trades=trade_history[-50:])
 
 @app.route('/health', methods=['GET'])
 def health():
@@ -624,15 +803,15 @@ def train():
 
 if __name__ == '__main__':
     print("="*70)
-    print("🤖 MONEY GLITCH AI - WITH BUYER/SELLER FLOW DETECTION")
+    print("🤖 MONEY GLITCH AI - WITH INSTITUTIONAL DETECTION")
     print("="*70)
     print("Features enabled:")
     print("  ✅ Buyer/Seller flow detection")
-    print("  ✅ Flow strength scoring")
-    print("  ✅ Confluence analysis (flow + zone)")
-    print("  ✅ Natural language explanations")
-    print("  ✅ Actionable trading advice")
-    print("  ✅ Trade logging with flow data")
+    print("  ✅ Institutional footprint detection")
+    print("  ✅ Volume climax analysis")
+    print("  ✅ Entry price suggestions (3 levels)")
+    print("  ✅ Stop loss calculation")
+    print("  ✅ Conviction scoring (EXTREME/HIGH/MEDIUM/LOW/NONE)")
     print("="*70)
     
     if os.path.exists(MODEL_FILE):
@@ -646,7 +825,6 @@ if __name__ == '__main__':
     
     print("\n🚀 Starting Flask server on port 5000...")
     print("📡 Webhook endpoint: http://localhost:5000/webhook")
-    print("📊 Dashboard: http://localhost:5000/dashboard")
     print("🔒 Security token: " + SECRET_TOKEN)
     print("="*70)
     
