@@ -277,10 +277,14 @@ class TradingAssistant:
             primary_entry = zone_low
             aggressive_entry = price if price < zone_high else zone_high
             conservative_entry = zone_low - (zone_range * 0.2)
+            trade_direction = "SELL"
+            trade_direction_emoji = "🔴"
         else:
             primary_entry = zone_high
             aggressive_entry = price if price > zone_low else zone_low
             conservative_entry = zone_high + (zone_range * 0.2)
+            trade_direction = "BUY"
+            trade_direction_emoji = "🟢"
         
         # Combine flow and institutional data
         flow = flow_data['flow']
@@ -309,6 +313,7 @@ class TradingAssistant:
                 conviction = "HIGH"
                 confidence = min(100, strength + flow_strength)
             recommended_entry = primary_entry
+            trade_signal = f"{trade_direction_emoji} {trade_direction}"
         elif zone_status == "REJECTING" and not flow_confluence:
             if is_institutional:
                 final_action = "CONFLICT_ENTRY"
@@ -321,18 +326,21 @@ class TradingAssistant:
                 conviction = "LOW"
                 confidence = min(100, strength * 0.6)
             recommended_entry = aggressive_entry
+            trade_signal = f"⚠️ {trade_direction} (Reduce Size)"
         elif zone_status == "ABSORBING":
             final_action = "WAIT"
             final_emoji = "⏳"
             conviction = "NONE"
             confidence = 30
             recommended_entry = None
+            trade_signal = "⏳ NO TRADE - Wait"
         else:
             final_action = "MONITOR"
             final_emoji = "👀"
             conviction = "NONE"
             confidence = 50
             recommended_entry = None
+            trade_signal = "👀 MONITOR - No Entry"
         
         # Generate explanations
         explanation = self._generate_explanation(
@@ -344,7 +352,8 @@ class TradingAssistant:
         advice = self._generate_advice(
             final_action, zone_status, strength, touches, flow, 
             recommended_entry, primary_entry, aggressive_entry, 
-            conservative_entry, stop_loss, is_institutional, conviction
+            conservative_entry, stop_loss, is_institutional, conviction,
+            trade_direction, trade_signal
         )
         
         return {
@@ -369,7 +378,9 @@ class TradingAssistant:
             "inst_type": inst_type,
             "volume_climax": volume_climax,
             "volume_multiplier": volume_multiplier,
-            "inst_pattern": inst_pattern
+            "inst_pattern": inst_pattern,
+            "trade_signal": trade_signal,
+            "trade_direction": trade_direction
         }
     
     def _generate_explanation(self, strength, touches, zone_status, is_bearish, volume_score, timeframe, rr_ratio, flow, flow_strength, is_institutional, inst_pattern, volume_climax, volume_multiplier):
@@ -413,13 +424,13 @@ class TradingAssistant:
         
         return explanation.strip()
     
-    def _generate_advice(self, action, zone_status, strength, touches, flow, recommended_entry, primary_entry, aggressive_entry, conservative_entry, stop_loss, is_institutional, conviction):
+    def _generate_advice(self, action, zone_status, strength, touches, flow, recommended_entry, primary_entry, aggressive_entry, conservative_entry, stop_loss, is_institutional, conviction, trade_direction, trade_signal):
         """Generate actionable trading advice with institutional context"""
         
         if action == "STRONG_ENTRY":
             return f"""
 💡 ACTIONABLE ADVICE:
-   ✅ ENTRY: {'SHORT' if 'bearish' in str(action) else 'LONG'} position
+   ✅ ENTRY: {trade_signal}
    📊 CONVICTION: {conviction}
    📍 ENTRY PRICE: {recommended_entry:.5f}
    
@@ -436,7 +447,7 @@ class TradingAssistant:
         elif action == "CONFLICT_ENTRY":
             return f"""
 💡 ACTIONABLE ADVICE:
-   ⚠️ REDUCED ENTRY: Half position only
+   ⚠️ REDUCED ENTRY: {trade_signal}
    📊 CONVICTION: {conviction}
    📍 ENTRY PRICE: {recommended_entry:.5f} (if taken)
    
@@ -453,7 +464,7 @@ class TradingAssistant:
         elif action == "WAIT":
             return f"""
 💡 ACTIONABLE ADVICE:
-   ⏳ DO NOT ENTER: Price absorbing, not rejecting
+   {trade_signal}
    👀 WATCH FOR: Close {'BELOW' if 'bearish' in str(action) else 'ABOVE'} zone
    📍 PRICE LEVELS:
       • Zone Entry: {primary_entry:.5f}
@@ -464,7 +475,7 @@ class TradingAssistant:
         else:
             return f"""
 💡 ACTIONABLE ADVICE:
-   👀 MONITOR ONLY: No entry yet
+   {trade_signal}
    🔍 WATCH: Price movement and candle closes
    📍 KEY LEVELS:
       • Zone Low: {primary_entry if 'bearish' else conservative_entry:.5f}
@@ -488,6 +499,7 @@ class TradingAssistant:
             "flow_confluence": decision.get('flow_confluence', False),
             "is_institutional": decision.get('is_institutional', False),
             "inst_type": decision.get('inst_type', ''),
+            "trade_signal": decision.get('trade_signal', ''),
             "result": result
         }
         trade_history.append(trade_record)
@@ -742,15 +754,23 @@ def webhook():
     🏦 Institutional Backing: {'✅ CONFIRMED' if assistant_decision['is_institutional'] else '❌ NOT DETECTED'}
     """)
     
-    if assistant_decision['stop_loss']:
-        print(f"🛑 Suggested Stop Loss: {assistant_decision['stop_loss']:.5f}")
+    print(f"""
+    {'='*70}
+    📈 TRADE EXECUTION SUMMARY
+    {'='*70}
+    {assistant_decision['trade_signal']}
+    📍 Entry Price: {assistant_decision['entry_price'] if assistant_decision['entry_price'] else 'N/A'}
+    🛑 Stop Loss: {assistant_decision['stop_loss']:.5f}
+    🎯 Take Profit 1: {assistant_decision['stop_loss'] - (assistant_decision['stop_loss'] - price) if is_bearish else assistant_decision['stop_loss'] + (price - assistant_decision['stop_loss']):.5f}
+    🎯 Take Profit 2: {assistant_decision['stop_loss'] - (assistant_decision['stop_loss'] - price) * 2 if is_bearish else assistant_decision['stop_loss'] + (price - assistant_decision['stop_loss']) * 2:.5f}
+    """)
     
     if assistant_decision['entry_price']:
         print(f"""
-    📍 ENTRY PRICE SUGGESTIONS:
-       • Primary Entry: {assistant_decision['primary_entry']:.5f}
-       • Aggressive Entry: {assistant_decision['aggressive_entry']:.5f}
-       • Conservative Entry: {assistant_decision['conservative_entry']:.5f}
+    ⚡ QUICK ACTION:
+       {'SELL' if is_bearish else 'BUY'} at {assistant_decision['entry_price']:.5f}
+       Stop Loss: {assistant_decision['stop_loss']:.5f}
+       Target: {assistant_decision['stop_loss'] - (assistant_decision['stop_loss'] - price) * 2 if is_bearish else assistant_decision['stop_loss'] + (price - assistant_decision['stop_loss']) * 2:.5f}
     """)
     
     print("="*70 + "\n")
@@ -780,7 +800,8 @@ def webhook():
             "is_institutional": assistant_decision['is_institutional'],
             "inst_type": assistant_decision['inst_type'],
             "volume_climax": assistant_decision['volume_climax'],
-            "volume_multiplier": assistant_decision['volume_multiplier']
+            "volume_multiplier": assistant_decision['volume_multiplier'],
+            "trade_signal": assistant_decision['trade_signal']
         },
         "timestamp": datetime.now().isoformat()
     }
@@ -799,33 +820,3 @@ def health():
 @app.route('/train', methods=['POST'])
 def train():
     train_setup_predictor()
-    return jsonify({"status": "success", "message": "Model retrained"}), 200
-
-if __name__ == '__main__':
-    print("="*70)
-    print("🤖 MONEY GLITCH AI - WITH INSTITUTIONAL DETECTION")
-    print("="*70)
-    print("Features enabled:")
-    print("  ✅ Buyer/Seller flow detection")
-    print("  ✅ Institutional footprint detection")
-    print("  ✅ Volume climax analysis")
-    print("  ✅ Entry price suggestions (3 levels)")
-    print("  ✅ Stop loss calculation")
-    print("  ✅ Conviction scoring (EXTREME/HIGH/MEDIUM/LOW/NONE)")
-    print("="*70)
-    
-    if os.path.exists(MODEL_FILE):
-        with open(MODEL_FILE, 'rb') as f:
-            model = pickle.load(f)
-        with open(SCALER_FILE, 'rb') as f:
-            scaler = pickle.load(f)
-        print("✅ Loaded existing setup predictor model")
-    else:
-        train_setup_predictor()
-    
-    print("\n🚀 Starting Flask server on port 5000...")
-    print("📡 Webhook endpoint: http://localhost:5000/webhook")
-    print("🔒 Security token: " + SECRET_TOKEN)
-    print("="*70)
-    
-    app.run(host='0.0.0.0', port=5000, debug=True)
